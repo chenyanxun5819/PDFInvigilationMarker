@@ -429,7 +429,40 @@ def extract_candidate_codes(text: str, ordered_codes: tuple[str, ...]) -> tuple[
             found.extend(segmented)
         elif is_candidate_schedule_code(part):
             found.append(part)
-    return tuple(found)
+        else:
+            found.extend(extract_embedded_candidate_codes(part, ordered_codes))
+    if found:
+        return tuple(dict.fromkeys(found))
+
+    embedded = extract_embedded_candidate_codes(normalized_text, ordered_codes)
+    if embedded:
+        return embedded
+    return ()
+
+
+def extract_embedded_candidate_codes(text: str, ordered_codes: tuple[str, ...]) -> tuple[str, ...]:
+    if not text:
+        return ()
+
+    cjk_single_codes = {
+        code for code in ordered_codes
+        if len(code) == 1 and is_cjk_character(code)
+    }
+    latin_codes = [
+        code for code in ordered_codes
+        if 2 <= len(code) <= 3 and all("A" <= char <= "Z" for char in code)
+    ]
+
+    found: list[str] = []
+    for char in text:
+        if char in cjk_single_codes:
+            found.append(char)
+
+    for code in latin_codes:
+        if text.startswith(code) or text.endswith(code):
+            found.append(code)
+
+    return tuple(dict.fromkeys(found))
 
 
 def collect_codes_from_row_items(

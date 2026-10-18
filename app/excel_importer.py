@@ -31,6 +31,11 @@ SEAT_BLOCK_ALIASES = ("区块", "Block", "區塊")
 # 座位号: 简体中文版本 "座位号" 放在最前
 SEAT_NO_ALIASES = ("座位号", "座位", "Seat", "Seat No", "Seat Number", "座位號", "座號")
 
+INVIGILATOR_CODE_WORKBOOK_NAMES = (
+    "监考代号名单.xlsx",
+    "監考代號名單.xlsx",
+)
+
 
 def import_config_from_excel(excel_path: Path, base_payload: dict | None = None) -> dict:
     workbook = load_workbook(excel_path, data_only=True)
@@ -63,6 +68,8 @@ def import_config_from_excel(excel_path: Path, base_payload: dict | None = None)
             "seat_no": normalize_seat_no(row[teacher_columns["seat_no"]]),
             "group": normalize_text(row[teacher_columns["group"]]),
         })
+
+    merge_invigilator_code_workbook(excel_path, teachers)
 
     seat_blocks = []
     if seat_sheet is not None and seat_columns is not None:
@@ -109,10 +116,12 @@ def import_config_from_excel(excel_path: Path, base_payload: dict | None = None)
     }
 
     metadata = dict(base_payload.get("metadata", {})) if base_payload else {}
+    invigilator_workbook_path = find_invigilator_code_workbook(excel_path)
     metadata.update({
         "generated_from_excel": str(excel_path),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "seat_blocks_source": "excel" if seat_sheet is not None else "existing_config",
+        "invigilator_codes_source": str(invigilator_workbook_path) if invigilator_workbook_path else "",
     })
 
     return {
@@ -168,3 +177,77 @@ def normalize_header(value: object) -> str:
 
 def normalize_text(value: object) -> str:
     return str(value or "").strip()
+
+
+def normalize_person_name(value: object) -> str:
+    return "".join(str(value or "").strip().split())
+
+
+def find_invigilator_code_workbook(excel_path: Path) -> Path | None:
+    for file_name in INVIGILATOR_CODE_WORKBOOK_NAMES:
+        candidate = excel_path.parent / file_name
+        if candidate.exists() and candidate != excel_path:
+            return candidate
+    return None
+
+
+def merge_invigilator_code_workbook(excel_path: Path, teachers: list[dict]) -> None:
+    workbook_path = find_invigilator_code_workbook(excel_path)
+    if workbook_path is None:
+        return
+
+    workbook = load_workbook(workbook_path, data_only=True)
+    sheet = workbook[workbook.sheetnames[0]]
+    columns = map_headers(sheet[1], {
+        "initial": TEACHER_INITIAL_ALIASES,
+        "name": TEACHER_NAME_ALIASES,
+        "teacher_id": TEACHER_ID_ALIASES,
+        "group": TEACHER_GROUP_ALIASES,
+    })
+
+    teacher_by_id = {
+        normalize_text(item.get("teacher_id", "")): item
+        for item in teachers
+        if normalize_text(item.get("teacher_id", ""))
+    }
+    teacher_by_name = {
+        normalize_person_name(item.get("name", "")): item
+        for item in teachers
+        if normalize_person_name(item.get("name", ""))
+    }
+
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        initial = normalize_text(row[columns["initial"]])
+        name = normalize_text(row[columns["name"]])
+        teacher_id = normalize_text(row[columns["teacher_id"]])
+        group = normalize_text(row[columns["group"]])
+        if not initial or not name:
+            continue
+
+        teacher_record = None
+        if teacher_id:
+            teacher_record = teacher_by_id.get(teacher_id)
+        if teacher_record is None:
+            teacher_record = teacher_by_name.get(normalize_person_name(name))
+
+        if teacher_record is not None:
+            teacher_record["initial"] = initial
+            if name:
+                teacher_record["name"] = name
+            if group and not teacher_record.get("group"):
+                teacher_record["group"] = group
+            if teacher_id and not teacher_record.get("teacher_id"):
+                teacher_record["teacher_id"] = teacher_id
+            continue
+
+        supplemental = {
+            "teacher_id": teacher_id,
+            "name": name,
+            "initial": initial,
+            "seat_no": "",
+            "group": group,
+        }
+        teachers.append(supplemental)
+        if teacher_id:
+            teacher_by_id[teacher_id] = supplemental
+        teacher_by_name[normalize_person_name(name)] = supplemental

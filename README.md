@@ -18,6 +18,11 @@
 
 若老师名单或座位区块有变动，可直接在程式内按 **「匯入老师名单 Excel」** 重新匯入，或手动修改使用者设定 JSON。
 
+若老师名单 Excel 同资料夹内另有 `监考代号名单.xlsx`，匯入时会自动：
+
+- 以教职员编号或姓名对照，覆写老师代号
+- 补入老师主档里缺少、但监考代号名单里存在的监考老师
+
 若输入档案同资料夹内存在排班 Excel，程式会自动：
 
 - 从主表逐格扫描老师代号并自动去重
@@ -60,6 +65,6 @@ d:\chhsban\chhsban-acadoc\.venv\Scripts\python.exe d:\chhsban\pdf_invigilation_m
 d:\chhsban\chhsban-acadoc\.venv\Scripts\python.exe d:\chhsban\pdf_invigilation_marker\build.py
 ```
 
-输出档会在 `pdf_invigilation_marker/dist/`，档名会包含版本号，例如 `PDF监考名单标记工具_v2026.10.18.2.exe`。
+输出档会在 `pdf_invigilation_marker/dist/`，档名会包含版本号，例如 `PDF监考名单标记工具_v2026.10.18.3.exe`。
 
 > exe 现已改为无主控台视窗模式；双击时不会再跳出黑底 cmd 背景视窗。
