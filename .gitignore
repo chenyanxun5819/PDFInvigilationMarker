@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+
+build/
+dist/
+test_output/
+
+.pytest_cache/
+.mypy_cache/
+
+*.log
+*.tmp
+
+PDF监考名单标记工具_*.spec
