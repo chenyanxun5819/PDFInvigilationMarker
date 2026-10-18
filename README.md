@@ -60,6 +60,6 @@ d:\chhsban\chhsban-acadoc\.venv\Scripts\python.exe d:\chhsban\pdf_invigilation_m
 d:\chhsban\chhsban-acadoc\.venv\Scripts\python.exe d:\chhsban\pdf_invigilation_marker\build.py
 ```
 
-输出档会在 `pdf_invigilation_marker/dist/`，档名会包含版本号，例如 `PDF监考名单标记工具_v2026.10.18.1.exe`。
+输出档会在 `pdf_invigilation_marker/dist/`，档名会包含版本号，例如 `PDF监考名单标记工具_v2026.10.18.2.exe`。
 
 > exe 现已改为无主控台视窗模式；双击时不会再跳出黑底 cmd 背景视窗。

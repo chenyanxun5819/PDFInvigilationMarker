@@ -86,7 +86,7 @@ def import_config_from_excel(excel_path: Path, base_payload: dict | None = None)
     sort_settings = dict(base_payload.get("sort_settings", {})) if base_payload else {"group_order": ["L", "R", "C"]}
     existing_ocr_settings = dict(base_payload.get("ocr_settings", {})) if base_payload else {}
     ocr_settings = {
-        "zoom": float(existing_ocr_settings.get("zoom", 2.0)),
+        "zoom": max(float(existing_ocr_settings.get("zoom", 3.0)), 3.0),
         "confidence_threshold": min(float(existing_ocr_settings.get("confidence_threshold", 0.48)), 0.48),
         "text_only_mode": False,
     }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import re
 from collections import defaultdict
 from functools import lru_cache
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 from openpyxl import load_workbook
+from PIL import Image, ImageFilter, ImageOps
 
 try:
     import pymupdf
@@ -32,6 +34,7 @@ OCR_ROW_Y_TOLERANCE = 6.0
 TEXT_NEARBY_ROW_TOLERANCE = 18.0
 OCR_NEARBY_ROW_TOLERANCE = 28.0
 OCR_EFFECTIVE_CONFIDENCE_CAP = 0.48
+IMAGE_OUTPUT_DPI_FALLBACK = 300
 CODE_NORMALIZATION_MAP = {
     "粱": "梁",
 }
@@ -640,6 +643,19 @@ def run_ocr_detections(page, ocr_engine, config: AppConfig) -> list[tuple[tuple[
 
 
 def run_ocr_on_rect(page, clip_rect, zoom: float, ocr_engine) -> list[tuple[tuple[float, float, float, float], str, float]]:
+    detections: list[tuple[tuple[float, float, float, float], str, float]] = []
+
+    if is_image_page(page):
+        base_image = render_image_clip(page, clip_rect, zoom)
+        x_scale = clip_rect.width / base_image.shape[1]
+        y_scale = clip_rect.height / base_image.shape[0]
+        for image_variant in build_ocr_image_variants(base_image):
+            result, _ = ocr_engine(image_variant)
+            if not result:
+                continue
+            detections.extend(convert_ocr_result_to_detections(result, clip_rect, x_scale, y_scale))
+        return detections
+
     pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip_rect, alpha=False)
     image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(pixmap.height, pixmap.width, pixmap.n)
     result, _ = ocr_engine(image)
@@ -648,6 +664,11 @@ def run_ocr_on_rect(page, clip_rect, zoom: float, ocr_engine) -> list[tuple[tupl
 
     x_scale = clip_rect.width / pixmap.width
     y_scale = clip_rect.height / pixmap.height
+    detections.extend(convert_ocr_result_to_detections(result, clip_rect, x_scale, y_scale))
+    return detections
+
+
+def convert_ocr_result_to_detections(result, clip_rect, x_scale: float, y_scale: float) -> list[tuple[tuple[float, float, float, float], str, float]]:
     detections: list[tuple[tuple[float, float, float, float], str, float]] = []
     for box, recognized_text, confidence_text in result:
         x_values = [point[0] for point in box]
@@ -660,6 +681,69 @@ def run_ocr_on_rect(page, clip_rect, zoom: float, ocr_engine) -> list[tuple[tupl
         )
         detections.append((rect, str(recognized_text).strip(), float(confidence_text)))
     return detections
+
+
+def build_ocr_image_variants(base_image: np.ndarray) -> tuple[np.ndarray, ...]:
+    base_pil = Image.fromarray(base_image)
+    autocontrast = ImageOps.autocontrast(base_pil)
+    sharpened = autocontrast.filter(ImageFilter.SHARPEN)
+    binary = sharpened.point(lambda value: 0 if value < 170 else 255, mode="L")
+
+    variants: list[np.ndarray] = []
+    for candidate in (base_pil, autocontrast, sharpened, binary):
+        array = np.array(candidate, dtype=np.uint8)
+        if not any(np.array_equal(array, existing) for existing in variants):
+            variants.append(array)
+    return tuple(variants)
+
+
+def render_image_clip(page, clip_rect, zoom: float) -> np.ndarray:
+    source_array = load_image_page_array(page.parent.name, page.number)
+    scale_x = source_array.shape[1] / page.rect.width
+    scale_y = source_array.shape[0] / page.rect.height
+    left = max(int(np.floor(clip_rect.x0 * scale_x)), 0)
+    top = max(int(np.floor(clip_rect.y0 * scale_y)), 0)
+    right = min(int(np.ceil(clip_rect.x1 * scale_x)), source_array.shape[1])
+    bottom = min(int(np.ceil(clip_rect.y1 * scale_y)), source_array.shape[0])
+    cropped = source_array[top:bottom, left:right]
+    if cropped.size == 0:
+        return source_array
+
+    target_width = max(cropped.shape[1], int(round(clip_rect.width * zoom)))
+    target_height = max(cropped.shape[0], int(round(clip_rect.height * zoom)))
+    if target_width > cropped.shape[1] or target_height > cropped.shape[0]:
+        resized = Image.fromarray(cropped).resize((target_width, target_height), resample=Image.Resampling.LANCZOS)
+        return np.array(resized, dtype=np.uint8)
+    return cropped
+
+
+@lru_cache(maxsize=8)
+def load_image_page_array(source_path: str, page_index: int) -> np.ndarray:
+    with Image.open(source_path) as image_doc:
+        image_doc.seek(page_index)
+        frame = image_doc.convert("L")
+        frame.load()
+        return np.array(frame, dtype=np.uint8)
+
+
+@lru_cache(maxsize=8)
+def load_image_page_stream(source_path: str, page_index: int) -> tuple[bytes, tuple[float, float]]:
+    with Image.open(source_path) as image_doc:
+        image_doc.seek(page_index)
+        frame = image_doc.copy()
+        dpi = image_doc.info.get("dpi", (IMAGE_OUTPUT_DPI_FALLBACK, IMAGE_OUTPUT_DPI_FALLBACK))
+
+    buffer = io.BytesIO()
+    frame.save(buffer, format="PNG", dpi=dpi)
+    return buffer.getvalue(), tuple(float(item) for item in dpi)
+
+
+def is_image_page(page) -> bool:
+    parent = getattr(page, "parent", None)
+    if parent is None or parent.is_pdf:
+        return False
+    source_name = getattr(parent, "name", "") or ""
+    return bool(source_name) and is_image_input_path(Path(source_name))
 
 
 def iter_page_tiles(page_rect):
@@ -816,8 +900,8 @@ def append_source_page(output_doc, source_doc, page_index: int):
 
     source_page = source_doc[page_index]
     output_page = output_doc.new_page(width=source_page.rect.width, height=source_page.rect.height)
-    pixmap = source_page.get_pixmap(alpha=False)
-    output_page.insert_image(output_page.rect, pixmap=pixmap)
+    image_stream, _ = load_image_page_stream(source_doc.name, page_index)
+    output_page.insert_image(output_page.rect, stream=image_stream, keep_proportion=False)
     return output_page
 
 

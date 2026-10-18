@@ -55,7 +55,7 @@ class AppConfig:
     seat_blocks: tuple[SeatBlockRecord, ...]
     group_order: tuple[str, ...] = ("L", "R", "C")
     text_only_mode: bool = False
-    ocr_zoom: float = 2.0
+    ocr_zoom: float = 3.0
     confidence_threshold: float = 0.48
     label_anchor: str = "bottom_left"
     label_x: float = 18.0
