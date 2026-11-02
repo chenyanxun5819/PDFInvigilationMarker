@@ -1,19 +1,13 @@
 from __future__ import annotations
 
-import io
 import re
 from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
+import pymupdf
 from openpyxl import load_workbook
-from PIL import Image, ImageFilter, ImageOps
-
-try:
-    import pymupdf
-except ModuleNotFoundError:
-    import fitz as pymupdf
 
 from .models import AppConfig, MatchOccurrence, ProcessResult, TeacherMatch, TeacherRecord
 from .utils import normalize_seat_no
@@ -29,12 +23,6 @@ TILE_ROWS = 4
 TILE_COLS = 4
 TILE_OVERLAP = 40
 TILE_ZOOM_MULTIPLIER = 2.75
-TEXT_ROW_Y_TOLERANCE = 3.0
-OCR_ROW_Y_TOLERANCE = 6.0
-TEXT_NEARBY_ROW_TOLERANCE = 18.0
-OCR_NEARBY_ROW_TOLERANCE = 28.0
-OCR_EFFECTIVE_CONFIDENCE_CAP = 0.48
-IMAGE_OUTPUT_DPI_FALLBACK = 300
 CODE_NORMALIZATION_MAP = {
     "粱": "梁",
 }
@@ -75,7 +63,7 @@ def process_pdf(
                 progress_callback(f"识别第 {page_index + 1}/{total_pages} 页...")
             page = source_doc[page_index]
             matches, used_text_layer, used_ocr = detect_page_matches(page, ocr_engine, config, teacher_map)
-            if used_ocr and config.text_only_mode and source_doc.is_pdf:
+            if used_ocr and config.text_only_mode:
                 if progress_callback:
                     progress_callback("仅文字层模式已开启：本页跳过 OCR 回退。")
                 matches = {}
@@ -139,19 +127,18 @@ def resolve_output_teachers(
     config: AppConfig,
     progress_callback=None,
 ) -> tuple[TeacherRecord, ...]:
-    include_unresolved = not is_image_input_path(input_pdf)
     pdf_codes = detect_input_pdf_codes(input_pdf, teachers, config)
     if pdf_codes:
-        resolved = resolve_teacher_records_from_codes(pdf_codes, teachers, include_unresolved=include_unresolved)
+        resolved = resolve_teacher_records_from_codes(pdf_codes, teachers)
         if progress_callback:
-            progress_callback(f"已从输入档案自动去重，共 {len(resolved)} 位老师，将依此输出页数。")
+            progress_callback(f"已从输入 PDF 自动去重，共 {len(resolved)} 位老师，将依此输出页数。")
         return resolved
 
     schedule_codes = load_schedule_teacher_codes(input_pdf.parent, teachers)
     if not schedule_codes:
         return teachers
 
-    resolved = resolve_teacher_records_from_codes(schedule_codes, teachers, include_unresolved=include_unresolved)
+    resolved = resolve_teacher_records_from_codes(schedule_codes, teachers)
     if progress_callback:
         progress_callback(f"已从排班 Excel 自动去重，共 {len(resolved)} 位老师，将依此输出页数。")
     return tuple(resolved)
@@ -205,7 +192,6 @@ def load_schedule_teacher_codes(folder: Path, teachers: tuple[TeacherRecord, ...
 def resolve_teacher_records_from_codes(
     codes: tuple[str, ...],
     teachers: tuple[TeacherRecord, ...],
-    include_unresolved: bool = True,
 ) -> tuple[TeacherRecord, ...]:
     teacher_map = build_teacher_lookup(teachers)
     resolved: list[TeacherRecord] = []
@@ -214,8 +200,6 @@ def resolve_teacher_records_from_codes(
     for code in codes:
         teacher = teacher_map.get(code)
         if teacher is None:
-            if not include_unresolved:
-                continue
             resolved.append(
                 TeacherRecord(
                     teacher_id="",
@@ -235,10 +219,6 @@ def resolve_teacher_records_from_codes(
             seen_primary_codes.add(primary_code)
 
     return tuple(resolved)
-
-
-def is_image_input_path(input_path: Path) -> bool:
-    return input_path.suffix.lower() in {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
 
 def detect_input_pdf_codes(
@@ -261,7 +241,7 @@ def detect_input_pdf_codes(
                         seen_codes.add(code)
                 continue
 
-            if config.text_only_mode and document.is_pdf:
+            if config.text_only_mode:
                 continue
 
             if ocr_engine is None:
@@ -296,13 +276,12 @@ def detect_page_matches(
 
     segment_codes = build_segmentation_codes(teacher_map)
     detections = run_ocr_detections(page, ocr_engine, config)
-    effective_threshold = get_effective_ocr_confidence_threshold(config)
 
     for rect, recognized_text, confidence in detections:
-        if confidence < effective_threshold:
+        if confidence < config.confidence_threshold:
             continue
 
-        segments = extract_candidate_codes(str(recognized_text).strip(), segment_codes)
+        segments = segment_teacher_text(recognized_text, segment_codes)
         if not segments:
             continue
 
@@ -317,7 +296,6 @@ def detect_page_matches(
                     rect=segment_rect,
                     recognized_text=str(recognized_text).strip(),
                     confidence=confidence,
-                    detection_source="ocr",
                 )
             )
     return matches, False, False
@@ -355,7 +333,6 @@ def detect_text_layer_matches(page, teacher_map: dict[str, TeacherRecord]) -> di
                     rect=segment_rect,
                     recognized_text=text,
                     confidence=1.0,
-                    detection_source="text",
                 )
             )
     return matches
@@ -371,11 +348,10 @@ def detect_codes_from_text_layer(page, ordered_codes: tuple[str, ...]) -> tuple[
 
 
 def detect_codes_from_ocr(page, ocr_engine, config: AppConfig, ordered_codes: tuple[str, ...]) -> tuple[str, ...]:
-    effective_threshold = get_effective_ocr_confidence_threshold(config)
     items = [
         (rect, str(recognized_text).strip())
         for rect, recognized_text, confidence in run_ocr_detections(page, ocr_engine, config)
-        if confidence >= effective_threshold and str(recognized_text).strip()
+        if confidence >= config.confidence_threshold and str(recognized_text).strip()
     ]
     return collect_codes_from_row_items(items, ordered_codes)
 
@@ -398,11 +374,10 @@ def detect_pdf_invigilator_codes_from_ocr(
     config: AppConfig,
     teacher_map: dict[str, TeacherRecord],
 ) -> tuple[str, ...]:
-    effective_threshold = get_effective_ocr_confidence_threshold(config)
     items = [
         (rect, str(recognized_text).strip())
         for rect, recognized_text, confidence in run_ocr_detections(page, ocr_engine, config)
-        if confidence >= effective_threshold and str(recognized_text).strip()
+        if confidence >= config.confidence_threshold and str(recognized_text).strip()
     ]
     return collect_pdf_invigilator_codes(items, teacher_map, strict_text_layer=False)
 
@@ -429,40 +404,7 @@ def extract_candidate_codes(text: str, ordered_codes: tuple[str, ...]) -> tuple[
             found.extend(segmented)
         elif is_candidate_schedule_code(part):
             found.append(part)
-        else:
-            found.extend(extract_embedded_candidate_codes(part, ordered_codes))
-    if found:
-        return tuple(dict.fromkeys(found))
-
-    embedded = extract_embedded_candidate_codes(normalized_text, ordered_codes)
-    if embedded:
-        return embedded
-    return ()
-
-
-def extract_embedded_candidate_codes(text: str, ordered_codes: tuple[str, ...]) -> tuple[str, ...]:
-    if not text:
-        return ()
-
-    cjk_single_codes = {
-        code for code in ordered_codes
-        if len(code) == 1 and is_cjk_character(code)
-    }
-    latin_codes = [
-        code for code in ordered_codes
-        if 2 <= len(code) <= 3 and all("A" <= char <= "Z" for char in code)
-    ]
-
-    found: list[str] = []
-    for char in text:
-        if char in cjk_single_codes:
-            found.append(char)
-
-    for code in latin_codes:
-        if text.startswith(code) or text.endswith(code):
-            found.append(code)
-
-    return tuple(dict.fromkeys(found))
+    return tuple(found)
 
 
 def collect_codes_from_row_items(
@@ -515,8 +457,6 @@ def collect_codes_from_row_items(
     seen: set[str] = set()
     for index in sorted(qualifying_indexes):
         for code in row_infos[index]["candidate_codes"]:
-            if not strict_text_layer and code not in teacher_map:
-                continue
             if code not in seen:
                 found.append(code)
                 seen.add(code)
@@ -529,9 +469,7 @@ def collect_pdf_invigilator_codes(
     strict_text_layer: bool,
 ) -> tuple[str, ...]:
     ordered_codes = build_segmentation_codes(teacher_map)
-    row_tolerance = TEXT_ROW_Y_TOLERANCE if strict_text_layer else OCR_ROW_Y_TOLERANCE
-    nearby_row_tolerance = TEXT_NEARBY_ROW_TOLERANCE if strict_text_layer else OCR_NEARBY_ROW_TOLERANCE
-    rows = build_text_rows(items, row_tolerance=row_tolerance)
+    rows = build_text_rows(items)
     row_infos = []
 
     for row in rows:
@@ -573,13 +511,6 @@ def collect_pdf_invigilator_codes(
             continue
         if known_code_count >= 1 and candidate_word_count >= 2 and candidate_word_count >= max(2, int(meaningful_word_count * 0.5)):
             qualifying_indexes.add(index)
-            continue
-        if not strict_text_layer and known_code_count >= 1 and has_nearby_candidate_row(
-            row_infos,
-            index,
-            max_distance=nearby_row_tolerance,
-        ):
-            qualifying_indexes.add(index)
 
     for index, info in enumerate(row_infos):
         if index in qualifying_indexes:
@@ -588,7 +519,7 @@ def collect_pdf_invigilator_codes(
         meaningful_word_count = info["meaningful_word_count"]
         if candidate_word_count == 0 or candidate_word_count != meaningful_word_count:
             continue
-        if has_nearby_known_invigilator_row(row_infos, index, max_distance=nearby_row_tolerance):
+        if has_nearby_known_invigilator_row(row_infos, index):
             qualifying_indexes.add(index)
 
     found: list[str] = []
@@ -626,41 +557,36 @@ def extract_pdf_check_candidate_codes(
     return extract_candidate_codes(text, ordered_codes)
 
 
-def get_effective_ocr_confidence_threshold(config: AppConfig) -> float:
-    return min(config.confidence_threshold, OCR_EFFECTIVE_CONFIDENCE_CAP)
-
-
 def build_text_rows(
-    items: list[tuple[tuple[float, float, float, float], str]],
-    row_tolerance: float = TEXT_ROW_Y_TOLERANCE,
+    items: list[tuple[tuple[float, float, float, float], str]]
 ) -> list[list[tuple[tuple[float, float, float, float], str]]]:
     rows: list[list[tuple[tuple[float, float, float, float], str]]] = []
     for item in sorted(items, key=lambda value: (value[0][1], value[0][0])):
-        if not rows or abs(item[0][1] - rows[-1][0][0][1]) > row_tolerance:
+        if not rows or abs(item[0][1] - rows[-1][0][0][1]) > 3.0:
             rows.append([item])
         else:
             rows[-1].append(item)
     return rows
 
 
-def has_nearby_candidate_row(row_infos: list[dict], index: int, max_distance: float = TEXT_NEARBY_ROW_TOLERANCE) -> bool:
+def has_nearby_candidate_row(row_infos: list[dict], index: int) -> bool:
     current_y = row_infos[index]["y"]
     for other_index in (index - 1, index + 1):
         if other_index < 0 or other_index >= len(row_infos):
             continue
         other = row_infos[other_index]
-        if abs(other["y"] - current_y) <= max_distance and other["candidate_word_count"] >= 1:
+        if abs(other["y"] - current_y) <= 18 and other["candidate_word_count"] >= 1:
             return True
     return False
 
 
-def has_nearby_known_invigilator_row(row_infos: list[dict], index: int, max_distance: float = TEXT_NEARBY_ROW_TOLERANCE) -> bool:
+def has_nearby_known_invigilator_row(row_infos: list[dict], index: int) -> bool:
     current_y = row_infos[index]["y"]
     for other_index in (index - 1, index + 1):
         if other_index < 0 or other_index >= len(row_infos):
             continue
         other = row_infos[other_index]
-        if abs(other["y"] - current_y) <= max_distance and other["known_code_count"] >= 1:
+        if abs(other["y"] - current_y) <= 18 and other["known_code_count"] >= 1:
             return True
     return False
 
@@ -676,19 +602,6 @@ def run_ocr_detections(page, ocr_engine, config: AppConfig) -> list[tuple[tuple[
 
 
 def run_ocr_on_rect(page, clip_rect, zoom: float, ocr_engine) -> list[tuple[tuple[float, float, float, float], str, float]]:
-    detections: list[tuple[tuple[float, float, float, float], str, float]] = []
-
-    if is_image_page(page):
-        base_image = render_image_clip(page, clip_rect, zoom)
-        x_scale = clip_rect.width / base_image.shape[1]
-        y_scale = clip_rect.height / base_image.shape[0]
-        for image_variant in build_ocr_image_variants(base_image):
-            result, _ = ocr_engine(image_variant)
-            if not result:
-                continue
-            detections.extend(convert_ocr_result_to_detections(result, clip_rect, x_scale, y_scale))
-        return detections
-
     pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip_rect, alpha=False)
     image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(pixmap.height, pixmap.width, pixmap.n)
     result, _ = ocr_engine(image)
@@ -697,11 +610,6 @@ def run_ocr_on_rect(page, clip_rect, zoom: float, ocr_engine) -> list[tuple[tupl
 
     x_scale = clip_rect.width / pixmap.width
     y_scale = clip_rect.height / pixmap.height
-    detections.extend(convert_ocr_result_to_detections(result, clip_rect, x_scale, y_scale))
-    return detections
-
-
-def convert_ocr_result_to_detections(result, clip_rect, x_scale: float, y_scale: float) -> list[tuple[tuple[float, float, float, float], str, float]]:
     detections: list[tuple[tuple[float, float, float, float], str, float]] = []
     for box, recognized_text, confidence_text in result:
         x_values = [point[0] for point in box]
@@ -714,69 +622,6 @@ def convert_ocr_result_to_detections(result, clip_rect, x_scale: float, y_scale:
         )
         detections.append((rect, str(recognized_text).strip(), float(confidence_text)))
     return detections
-
-
-def build_ocr_image_variants(base_image: np.ndarray) -> tuple[np.ndarray, ...]:
-    base_pil = Image.fromarray(base_image)
-    autocontrast = ImageOps.autocontrast(base_pil)
-    sharpened = autocontrast.filter(ImageFilter.SHARPEN)
-    binary = sharpened.point(lambda value: 0 if value < 170 else 255, mode="L")
-
-    variants: list[np.ndarray] = []
-    for candidate in (base_pil, autocontrast, sharpened, binary):
-        array = np.array(candidate, dtype=np.uint8)
-        if not any(np.array_equal(array, existing) for existing in variants):
-            variants.append(array)
-    return tuple(variants)
-
-
-def render_image_clip(page, clip_rect, zoom: float) -> np.ndarray:
-    source_array = load_image_page_array(page.parent.name, page.number)
-    scale_x = source_array.shape[1] / page.rect.width
-    scale_y = source_array.shape[0] / page.rect.height
-    left = max(int(np.floor(clip_rect.x0 * scale_x)), 0)
-    top = max(int(np.floor(clip_rect.y0 * scale_y)), 0)
-    right = min(int(np.ceil(clip_rect.x1 * scale_x)), source_array.shape[1])
-    bottom = min(int(np.ceil(clip_rect.y1 * scale_y)), source_array.shape[0])
-    cropped = source_array[top:bottom, left:right]
-    if cropped.size == 0:
-        return source_array
-
-    target_width = max(cropped.shape[1], int(round(clip_rect.width * zoom)))
-    target_height = max(cropped.shape[0], int(round(clip_rect.height * zoom)))
-    if target_width > cropped.shape[1] or target_height > cropped.shape[0]:
-        resized = Image.fromarray(cropped).resize((target_width, target_height), resample=Image.Resampling.LANCZOS)
-        return np.array(resized, dtype=np.uint8)
-    return cropped
-
-
-@lru_cache(maxsize=8)
-def load_image_page_array(source_path: str, page_index: int) -> np.ndarray:
-    with Image.open(source_path) as image_doc:
-        image_doc.seek(page_index)
-        frame = image_doc.convert("L")
-        frame.load()
-        return np.array(frame, dtype=np.uint8)
-
-
-@lru_cache(maxsize=8)
-def load_image_page_stream(source_path: str, page_index: int) -> tuple[bytes, tuple[float, float]]:
-    with Image.open(source_path) as image_doc:
-        image_doc.seek(page_index)
-        frame = image_doc.copy()
-        dpi = image_doc.info.get("dpi", (IMAGE_OUTPUT_DPI_FALLBACK, IMAGE_OUTPUT_DPI_FALLBACK))
-
-    buffer = io.BytesIO()
-    frame.save(buffer, format="PNG", dpi=dpi)
-    return buffer.getvalue(), tuple(float(item) for item in dpi)
-
-
-def is_image_page(page) -> bool:
-    parent = getattr(page, "parent", None)
-    if parent is None or parent.is_pdf:
-        return False
-    source_name = getattr(parent, "name", "") or ""
-    return bool(source_name) and is_image_input_path(Path(source_name))
 
 
 def iter_page_tiles(page_rect):
@@ -919,23 +764,12 @@ def append_teacher_pages(output_doc, source_doc, teacher_match: TeacherMatch, co
         occurrences_by_page[occurrence.page_index].append(occurrence)
 
     for page_index in resolve_target_page_indexes(teacher_match, source_doc.page_count):
-        page = append_source_page(output_doc, source_doc, page_index)
+        output_doc.insert_pdf(source_doc, from_page=page_index, to_page=page_index)
+        page = output_doc[-1]
         register_font(page, font_path)
         add_teacher_label(page, teacher_match, config, font_path)
         for occurrence in occurrences_by_page.get(page_index, []):
-            add_occurrence_marker(page, occurrence, config)
-
-
-def append_source_page(output_doc, source_doc, page_index: int):
-    if source_doc.is_pdf:
-        output_doc.insert_pdf(source_doc, from_page=page_index, to_page=page_index)
-        return output_doc[-1]
-
-    source_page = source_doc[page_index]
-    output_page = output_doc.new_page(width=source_page.rect.width, height=source_page.rect.height)
-    image_stream, _ = load_image_page_stream(source_doc.name, page_index)
-    output_page.insert_image(output_page.rect, stream=image_stream, keep_proportion=False)
-    return output_page
+            add_star_marker(page, occurrence, config)
 
 
 def resolve_target_page_indexes(teacher_match: TeacherMatch, source_page_count: int) -> tuple[int, ...]:
@@ -994,36 +828,8 @@ def add_teacher_label(page, teacher_match: TeacherMatch, config: AppConfig, font
         cursor_x += width + gap
 
 
-def add_occurrence_marker(page, occurrence: MatchOccurrence, config: AppConfig):
+def add_star_marker(page, occurrence: MatchOccurrence, config: AppConfig):
     rect = pymupdf.Rect(*occurrence.rect)
-    marker_rect = rect
-    if occurrence.detection_source == "ocr":
-        marker_rect = add_highlight_marker(page, rect, config)
-    add_star_marker(page, marker_rect, config)
-
-
-def add_highlight_marker(page, rect: pymupdf.Rect, config: AppConfig) -> pymupdf.Rect:
-    padding = max(config.highlight_padding, 1.0)
-    highlight_rect = pymupdf.Rect(
-        rect.x0 - padding,
-        rect.y0 - padding,
-        rect.x1 + padding,
-        rect.y1 + padding,
-    ) & page.rect
-    page.draw_rect(
-        highlight_rect,
-        color=config.highlight_border_rgb,
-        fill=config.highlight_fill_rgb,
-        width=1.1,
-        overlay=True,
-        stroke_opacity=0.9,
-        fill_opacity=0.2,
-    )
-    return highlight_rect
-
-
-def add_star_marker(page, marker_rect: pymupdf.Rect, config: AppConfig):
-    rect = marker_rect
     marker_size = max(rect.height * config.star_scale, 11)
     center_y = (rect.y0 + rect.y1) / 2
     star_width = pymupdf.get_text_length("*", fontname="helv", fontsize=marker_size)

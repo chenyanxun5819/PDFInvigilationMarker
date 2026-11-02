@@ -26,7 +26,6 @@ class MatchOccurrence:
     rect: tuple[float, float, float, float]
     recognized_text: str
     confidence: float
-    detection_source: str = "text"
 
 
 @dataclass(frozen=True)
@@ -55,8 +54,8 @@ class AppConfig:
     seat_blocks: tuple[SeatBlockRecord, ...]
     group_order: tuple[str, ...] = ("L", "R", "C")
     text_only_mode: bool = False
-    ocr_zoom: float = 3.0
-    confidence_threshold: float = 0.48
+    ocr_zoom: float = 2.0
+    confidence_threshold: float = 0.55
     label_anchor: str = "bottom_left"
     label_x: float = 18.0
     label_y: float = 18.0

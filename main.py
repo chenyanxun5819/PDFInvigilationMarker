@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import argparse
 import sys
-import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox
 
 from app.config_store import ensure_user_config, import_excel_to_user_config, load_config
-from app.version import APP_NAME, APP_VERSION
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -16,12 +13,11 @@ if hasattr(sys.stderr, "reconfigure"):
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=f"{APP_NAME} v{APP_VERSION}")
-    parser.add_argument("--input", type=Path, help="输入 PDF / TIFF 路径")
+    parser = argparse.ArgumentParser(description="PDF 监考名单标记工具")
+    parser.add_argument("--input", type=Path, help="输入 PDF 路径")
     parser.add_argument("--output", type=Path, help="输出 PDF 路径")
     parser.add_argument("--config", type=Path, help="指定 JSON 设定档路径")
     parser.add_argument("--import-excel", type=Path, help="把老师名单 Excel 匯入成目前使用的设定档")
-    parser.add_argument("--version", action="version", version=f"{APP_NAME} v{APP_VERSION}")
     return parser
 
 
@@ -58,11 +54,6 @@ def main() -> int:
     try:
         return run_cli(args)
     except Exception as exc:
-        if not sys.stderr:
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showerror("程式错误", str(exc), parent=root)
-            root.destroy()
         print(f"错误：{exc}")
         return 1
 

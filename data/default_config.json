@@ -11,8 +11,8 @@
     ]
   },
   "ocr_settings": {
-    "zoom": 3.0,
-    "confidence_threshold": 0.48,
+    "zoom": 2.0,
+    "confidence_threshold": 0.55,
     "text_only_mode": false
   },
   "render_settings": {

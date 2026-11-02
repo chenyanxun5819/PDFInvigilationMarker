@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import threading
-import traceback
 import tkinter as tk
 from pathlib import Path
 from queue import Empty, Queue
@@ -18,16 +17,13 @@ from .config_store import (
     update_render_settings,
 )
 from .pdf_processor import resolve_output_teachers
-from .template_generator import create_teacher_list_template
-from .version import build_app_title
 
 
 class MainWindow:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title(build_app_title())
+        self.root.title("PDF 监考名单标记工具")
         self.root.geometry("920x760")
-        self.root.report_callback_exception = self._handle_callback_exception
 
         self.message_queue: Queue[tuple] = Queue()
         self.worker_thread: threading.Thread | None = None
@@ -48,8 +44,8 @@ class MainWindow:
 
         self._build_ui()
         self.code_check_var.set(
-            "请选择输入档案。\n"
-            "输入档案去重人数：-\n"
+            "请选择输入 PDF。\n"
+            "输入 PDF 去重人数：-\n"
             "老师名单成功对照：-\n"
             "未知代码：-"
         )
@@ -63,10 +59,10 @@ class MainWindow:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(6, weight=1)
 
-        title = ttk.Label(self.root, text=build_app_title(), font=("Segoe UI", 16, "bold"))
+        title = ttk.Label(self.root, text="PDF 监考名单标记工具", font=("Segoe UI", 16, "bold"))
         title.grid(row=0, column=0, sticky="w", padx=14, pady=(14, 4))
 
-        description = ttk.Label(self.root, text="载入 PDF 或 TIFF，系统会先检查本次监考代码，再输出新的 PDF。")
+        description = ttk.Label(self.root, text="载入 PDF，系统会先检查本次监考代码，再输出新的 PDF。")
         description.grid(row=1, column=0, sticky="w", padx=14, pady=(0, 10))
 
         config_frame = ttk.LabelFrame(self.root, text="设定资料")
@@ -82,7 +78,6 @@ class MainWindow:
 
         button_row = ttk.Frame(config_frame)
         button_row.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 10))
-        ttk.Button(button_row, text="下载老师名单模板", command=self._download_template_excel).pack(side="left", padx=(0, 8))
         ttk.Button(button_row, text="匯入老师名单 Excel", command=self._import_excel_config).pack(side="left", padx=(0, 8))
         ttk.Button(button_row, text="开启设定资料夹", command=self._open_config_folder).pack(side="left", padx=(0, 8))
         ttk.Button(button_row, text="还原内建设定", command=self._restore_default_config).pack(side="left")
@@ -124,9 +119,9 @@ class MainWindow:
         file_frame.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 10))
         file_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(file_frame, text="输入档案").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
+        ttk.Label(file_frame, text="输入 PDF").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
         ttk.Entry(file_frame, textvariable=self.input_var).grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(10, 6))
-        ttk.Button(file_frame, text="选择档案", command=self._choose_input_pdf).grid(row=0, column=2, sticky="ew", padx=(0, 10), pady=(10, 6))
+        ttk.Button(file_frame, text="选择 PDF", command=self._choose_input_pdf).grid(row=0, column=2, sticky="ew", padx=(0, 10), pady=(10, 6))
 
         ttk.Label(file_frame, text="输出 PDF").grid(row=1, column=0, sticky="w", padx=10, pady=(0, 10))
         ttk.Entry(file_frame, textvariable=self.output_var).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 10))
@@ -157,9 +152,8 @@ class MainWindow:
 
     def _choose_input_pdf(self):
         file_path = filedialog.askopenfilename(
-            parent=self.root,
-            title="选择监考档案",
-            filetypes=[("Supported Files", "*.pdf *.tif *.tiff"), ("PDF Files", "*.pdf"), ("TIFF Files", "*.tif *.tiff")],
+            title="选择监考 PDF",
+            filetypes=[("PDF Files", "*.pdf")],
         )
         if not file_path:
             return
@@ -172,7 +166,6 @@ class MainWindow:
     def _choose_output_pdf(self):
         initial_path = self.output_var.get().strip() or self.input_var.get().strip()
         file_path = filedialog.asksaveasfilename(
-            parent=self.root,
             title="选择输出 PDF",
             initialfile=Path(initial_path).name if initial_path else "output_marked.pdf",
             defaultextension=".pdf",
@@ -181,27 +174,8 @@ class MainWindow:
         if file_path:
             self.output_var.set(file_path)
 
-    def _download_template_excel(self):
-        """下载老师名单 Excel 模板。"""
-        file_path = filedialog.asksaveasfilename(
-            parent=self.root,
-            title="保存老师名单模板",
-            defaultextension=".xlsx",
-            filetypes=[("Excel Files", "*.xlsx")],
-            initialfile="老师名单模板.xlsx",
-        )
-        if not file_path:
-            return
-        try:
-            create_teacher_list_template(Path(file_path))
-            self._append_log(f"已下载模板：{file_path}")
-            messagebox.showinfo("下载成功", f"模板已保存到：\n{file_path}", parent=self.root)
-        except Exception as exc:
-            messagebox.showerror("下载失败", str(exc), parent=self.root)
-
     def _import_excel_config(self):
         file_path = filedialog.askopenfilename(
-            parent=self.root,
             title="选择老师名单 Excel",
             filetypes=[("Excel Files", "*.xlsx *.xlsm")],
         )
@@ -212,7 +186,7 @@ class MainWindow:
             self._refresh_config_status()
             self._append_log(f"已匯入设定：{target_path}")
         except Exception as exc:
-            messagebox.showerror("匯入失败", str(exc), parent=self.root)
+            messagebox.showerror("匯入失败", str(exc))
 
     def _open_config_folder(self):
         config_dir = get_user_data_dir()
@@ -225,7 +199,7 @@ class MainWindow:
             self._refresh_config_status()
             self._append_log(f"已还原内建设定：{target_path}")
         except Exception as exc:
-            messagebox.showerror("还原失败", str(exc), parent=self.root)
+            messagebox.showerror("还原失败", str(exc))
 
     def _save_render_settings(self):
         try:
@@ -234,9 +208,9 @@ class MainWindow:
             self._refresh_config_status()
             self._append_log(f"已保存标签设定：{target_path}")
         except ValueError:
-            messagebox.showerror("储存失败", "标签设定必须是数字。", parent=self.root)
+            messagebox.showerror("储存失败", "标签设定必须是数字。")
         except Exception as exc:
-            messagebox.showerror("储存失败", str(exc), parent=self.root)
+            messagebox.showerror("储存失败", str(exc))
 
     def _save_processing_mode(self):
         try:
@@ -244,14 +218,14 @@ class MainWindow:
             self._refresh_config_status()
             self._append_log(f"已保存处理模式设定：{target_path}")
         except Exception as exc:
-            messagebox.showerror("储存失败", str(exc), parent=self.root)
+            messagebox.showerror("储存失败", str(exc))
 
     def _start_processing(self):
         input_path = Path(self.input_var.get().strip())
         output_path = Path(self.output_var.get().strip())
 
         if not input_path.exists():
-            messagebox.showwarning("资料不足", "请先选择有效的输入档案。")
+            messagebox.showwarning("资料不足", "请先选择有效的输入 PDF。")
             return
         if output_path.suffix.lower() != ".pdf":
             messagebox.showwarning("资料不足", "输出档案必须是 .pdf。")
@@ -337,8 +311,8 @@ class MainWindow:
             self.label_anchor_var.set("bottom_left")
             self.text_only_mode_var.set(False)
             self.code_check_var.set(
-                "请选择输入档案。\n"
-                "输入档案去重人数：-\n"
+                "请选择输入 PDF。\n"
+                "输入 PDF 去重人数：-\n"
                 "老师名单成功对照：-\n"
                 "未知代码：-"
             )
@@ -360,11 +334,6 @@ class MainWindow:
         self.log_text.insert("end", message + "\n")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
-
-    def _handle_callback_exception(self, exc_type, exc_value, exc_traceback):
-        error_text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback)).strip()
-        self._append_log(error_text)
-        messagebox.showerror("程式错误", error_text, parent=self.root)
 
     def _set_log_text(self, text: str):
         self.log_text.configure(state="normal")
@@ -389,7 +358,7 @@ class MainWindow:
                     self.progress_bar["value"] = 100 if success else 0
                     self._append_log(message)
                     if success:
-                        messagebox.showinfo("处理完成", message, parent=self.root)
+                        messagebox.showinfo("处理完成", message)
                     else:
                         messagebox.showerror("处理失败", message)
         except Empty:
@@ -405,16 +374,16 @@ class MainWindow:
             matched_count = len(teachers) - len(unresolved_codes)
             if unresolved_codes:
                 self.code_check_var.set(
-                    "已完成输入档案代码检查。\n"
-                    f"输入档案去重人数：{len(teachers)}\n"
+                    "已完成输入 PDF 代码检查。\n"
+                    f"输入 PDF 去重人数：{len(teachers)}\n"
                     f"老师名单成功对照：{matched_count}\n"
                     f"未知代码：{len(unresolved_codes)}（{', '.join(unresolved_codes)}）\n"
                     "未知代码仍会照常输出，并以 !代码 标示。"
                 )
             else:
                 self.code_check_var.set(
-                    "已完成输入档案代码检查。\n"
-                    f"输入档案去重人数：{len(teachers)}\n"
+                    "已完成输入 PDF 代码检查。\n"
+                    f"输入 PDF 去重人数：{len(teachers)}\n"
                     f"老师名单成功对照：{matched_count}\n"
                     "未知代码：0"
                 )

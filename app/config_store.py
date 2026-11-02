@@ -86,8 +86,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         seat_blocks=seat_blocks,
         group_order=tuple(sort_settings.get("group_order", ["L", "R", "C"])),
         text_only_mode=bool(ocr_settings.get("text_only_mode", False)),
-        ocr_zoom=float(ocr_settings.get("zoom", 3.0)),
-        confidence_threshold=float(ocr_settings.get("confidence_threshold", 0.48)),
+        ocr_zoom=float(ocr_settings.get("zoom", 2.0)),
+        confidence_threshold=float(ocr_settings.get("confidence_threshold", 0.55)),
         label_anchor=str(render_settings.get("label_anchor", "bottom_left")).strip() or "bottom_left",
         label_x=float(render_settings.get("label_x", render_settings.get("label_margin", 18.0))),
         label_y=float(render_settings.get("label_y", render_settings.get("label_margin", 18.0))),
@@ -114,22 +114,10 @@ def save_config_payload(payload: dict, output_path: Path | None = None) -> Path:
     return target_path
 
 
-def load_existing_payload() -> dict:
-    user_path = get_user_config_path()
-    if user_path.exists():
-        return json.loads(user_path.read_text(encoding="utf-8"))
-
-    default_path = get_default_config_path()
-    if default_path.exists():
-        return json.loads(default_path.read_text(encoding="utf-8"))
-
-    return {}
-
-
 def import_excel_to_user_config(excel_path: Path) -> Path:
     from .excel_importer import import_config_from_excel
 
-    payload = import_config_from_excel(excel_path, base_payload=load_existing_payload())
+    payload = import_config_from_excel(excel_path)
     return save_config_payload(payload)
 
 
